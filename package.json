@@ -1,0 +1,8 @@
+{
+  "name": "fatmeal",
+  "version": "1.0.0",
+  "description": "温馨减脂餐 - 每日小厨房",
+  "dependencies": {
+    "@netlify/blobs": "^8.0.0"
+  }
+}

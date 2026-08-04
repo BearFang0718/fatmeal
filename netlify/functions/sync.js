@@ -1,7 +1,9 @@
-// 减脂餐档案云端同步 API v2
-// 使用 Netlify Function v2 ESM 格式 + context.blobStore（无需手动配置 Blobs）
+// 减脂餐档案云端同步 API
+// 使用 @netlify/blobs SDK（已在 package.json 中声明）
+// 在 Netlify Functions 中调用 getStore(name) 无需手动传 siteID/token，Netlify 自动注入
 
-// CORS 头
+import { getStore } from "@netlify/blobs";
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -16,7 +18,6 @@ function json(code, data, msg) {
   });
 }
 
-// 生成 6 位同步码（大写字母+数字，去除易混淆字符）
 function genCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let s = "";
@@ -24,16 +25,13 @@ function genCode() {
   return s;
 }
 
-// 简单校验同步码格式
 function validCode(c) {
   return typeof c === "string" && /^[A-Z2-9]{6}$/.test(c);
 }
 
-// 数据大小限制
 const MAX_SIZE = 2 * 1024 * 1024;
 
 export default async (req, context) => {
-  // 处理 CORS 预检
   if (req.method === "OPTIONS") {
     return new Response("", { status: 204, headers: CORS });
   }
@@ -46,26 +44,15 @@ export default async (req, context) => {
   catch { return json(400, null, "请求体格式错误"); }
 
   const action = body.action;
-
-  // 使用 Netlify 自动注入的 blobStore（不需要配置，自动可用）
   let store;
   try {
-    store = context.blobStore.get("fatmeal-sync");
+    // 关键：在 Functions 中不传 siteID/token，Netlify 自动注入
+    store = getStore("fatmeal-sync");
   } catch (e) {
-    // 兼容旧方式：如果 context.blobStore 不可用，尝试 @netlify/blobs SDK
-    try {
-      const { getStore } = await import("@netlify/blobs");
-      store = getStore("fatmeal-sync", {
-        siteID: Netlify.env.get("NETLIFY_SITE_ID") || Netlify.env.get("SITE_ID") || "",
-        token: Netlify.env.get("NETLIFY_TOKEN") || ""
-      });
-    } catch (e2) {
-      return json(500, null, "Blobs 未配置: " + (e?.message || e2?.message || "unknown"));
-    }
+    return json(500, null, "Blobs 初始化失败: " + (e?.message || "unknown"));
   }
 
   try {
-    // 1. 创建同步码并上传档案
     if (action === "create") {
       const data = body.data;
       if (!data) return json(400, null, "缺少 data 字段");
@@ -89,7 +76,6 @@ export default async (req, context) => {
       return json(500, null, "生成同步码失败，请重试");
     }
 
-    // 2. 关联已有同步码（首次拉取）
     if (action === "pull") {
       const code = (body.code || "").toUpperCase().trim();
       if (!validCode(code)) return json(400, null, "同步码格式错误");
@@ -102,7 +88,6 @@ export default async (req, context) => {
       }, "拉取成功");
     }
 
-    // 3. 推送更新（双向同步：以 updatedAt 较新者为准）
     if (action === "push") {
       const code = (body.code || "").toUpperCase().trim();
       if (!validCode(code)) return json(400, null, "同步码格式错误");
@@ -131,12 +116,18 @@ export default async (req, context) => {
       return json(200, { updatedAt: Date.now() }, "推送成功");
     }
 
-    // 4. 检查同步码是否存在
     if (action === "check") {
       const code = (body.code || "").toUpperCase().trim();
       if (!validCode(code)) return json(400, null, "同步码格式错误");
-      const rec = await store.get(code, { type: "json" });
-      return json(200, { exists: !!rec, updatedAt: rec ? rec.updatedAt : null }, rec ? "同步码有效" : "同步码不存在");
+      const raw = await store.get(code);
+      // 如果没取到直接返回不存在；否则尝试解析取 updatedAt
+      if (!raw) return json(200, { exists: false, updatedAt: null }, "同步码不存在");
+      let updatedAt = null;
+      try {
+        const rec = typeof raw === "string" ? JSON.parse(raw) : raw;
+        updatedAt = rec?.updatedAt || null;
+      } catch { /* ignore parse error */ }
+      return json(200, { exists: true, updatedAt }, "同步码有效");
     }
 
     return json(400, null, "未知的 action: " + action);
@@ -146,7 +137,6 @@ export default async (req, context) => {
   }
 };
 
-// 配置 Function 运行时（Netlify v2）
 export const config = {
   runtime: "nodejs20.x"
 };

@@ -4,3 +4,4 @@ node_modules/
 .DS_Store
 worker.js
 worker_code.txt
+sync_new.js

@@ -2,3 +2,5 @@ node_modules/
 .netlify/
 .env
 .DS_Store
+worker.js
+worker_code.txt

@@ -1,6 +1,5 @@
-// 减脂餐档案云端同步 API
-// 基于 Netlify Blobs 键值存储，免费、无需第三方服务
-const { getStore } = require("@netlify/blobs");
+// 减脂餐档案云端同步 API v2
+// 使用 Netlify Function v2 ESM 格式 + context.blobStore（无需手动配置 Blobs）
 
 // CORS 头
 const CORS = {
@@ -11,11 +10,10 @@ const CORS = {
 };
 
 function json(code, data, msg) {
-  return {
-    statusCode: code,
-    headers: CORS,
-    body: JSON.stringify({ ok: code < 400, code, msg, data })
-  };
+  return new Response(JSON.stringify({ ok: code < 400, code, msg, data }), {
+    status: code,
+    headers: CORS
+  });
 }
 
 // 生成 6 位同步码（大写字母+数字，去除易混淆字符）
@@ -31,24 +29,40 @@ function validCode(c) {
   return typeof c === "string" && /^[A-Z2-9]{6}$/.test(c);
 }
 
-// 数据大小限制（Netlify Blobs 单值上限 10MB，这里保守 2MB）
+// 数据大小限制
 const MAX_SIZE = 2 * 1024 * 1024;
 
-exports.handler = async (event) => {
+export default async (req, context) => {
   // 处理 CORS 预检
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: CORS, body: "" };
+  if (req.method === "OPTIONS") {
+    return new Response("", { status: 204, headers: CORS });
   }
-  if (event.httpMethod !== "POST") {
+  if (req.method !== "POST") {
     return json(405, null, "仅支持 POST 请求");
   }
 
   let body;
-  try { body = JSON.parse(event.body || "{}"); }
+  try { body = await req.json(); }
   catch { return json(400, null, "请求体格式错误"); }
 
   const action = body.action;
-  const store = getStore("fatmeal-sync");
+
+  // 使用 Netlify 自动注入的 blobStore（不需要配置，自动可用）
+  let store;
+  try {
+    store = context.blobStore.get("fatmeal-sync");
+  } catch (e) {
+    // 兼容旧方式：如果 context.blobStore 不可用，尝试 @netlify/blobs SDK
+    try {
+      const { getStore } = await import("@netlify/blobs");
+      store = getStore("fatmeal-sync", {
+        siteID: Netlify.env.get("NETLIFY_SITE_ID") || Netlify.env.get("SITE_ID") || "",
+        token: Netlify.env.get("NETLIFY_TOKEN") || ""
+      });
+    } catch (e2) {
+      return json(500, null, "Blobs 未配置: " + (e?.message || e2?.message || "unknown"));
+    }
+  }
 
   try {
     // 1. 创建同步码并上传档案
@@ -58,7 +72,6 @@ exports.handler = async (event) => {
       const payload = JSON.stringify(data);
       if (payload.length > MAX_SIZE) return json(413, null, "数据过大");
 
-      // 重试避免同步码冲突
       let code, tries = 0;
       do {
         code = genCode();
@@ -101,10 +114,8 @@ exports.handler = async (event) => {
       const rec = await store.get(code, { type: "json" });
       if (!rec) return json(404, null, "同步码不存在，请先创建");
 
-      // 客户端时间戳作为冲突解决依据（较新者胜出）
       const clientTime = body.clientTime || Date.now();
       if (rec.updatedAt && clientTime < rec.updatedAt - 5000) {
-        // 云端比客户端新 5 秒以上，返回云端版本让客户端合并
         return json(409, {
           data: rec.data,
           updatedAt: rec.updatedAt,
@@ -133,4 +144,9 @@ exports.handler = async (event) => {
     console.error("sync error:", e);
     return json(500, null, "服务器错误: " + (e.message || e));
   }
+};
+
+// 配置 Function 运行时（Netlify v2）
+export const config = {
+  runtime: "nodejs20.x"
 };
